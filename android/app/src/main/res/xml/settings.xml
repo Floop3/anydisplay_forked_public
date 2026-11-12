@@ -10,6 +10,29 @@
             app:key="scale"
             app:title="@string/pref_scale"
             app:useSimpleSummaryProvider="true" />
+        <SeekBarPreference
+            android:max="125"
+            app:defaultValue="75"
+            app:iconSpaceReserved="false"
+            app:key="scale_percent"
+            app:showSeekBarValue="false"
+            app:title="@string/pref_scale_custom" />
+        <ListPreference
+            app:defaultValue="current"
+            app:entries="@array/upscaler_entries"
+            app:entryValues="@array/upscaler_values"
+            app:iconSpaceReserved="false"
+            app:key="upscaler"
+            app:title="@string/pref_upscaler"
+            app:useSimpleSummaryProvider="true" />
+        <SeekBarPreference
+            android:max="100"
+            app:defaultValue="50"
+            app:iconSpaceReserved="false"
+            app:key="fsr_sharpness"
+            app:min="0"
+            app:showSeekBarValue="true"
+            app:title="@string/pref_fsr_sharpness" />
         <ListPreference
             app:defaultValue="60"
             app:entries="@array/refresh_entries"

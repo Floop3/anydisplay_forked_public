@@ -10,9 +10,11 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.preference.ListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
+import androidx.preference.SeekBarPreference
 import com.google.android.material.appbar.MaterialToolbar
 import dev.anydisplay.client.R
 import dev.anydisplay.client.data.Settings
+import dev.anydisplay.client.data.Upscaler
 import dev.anydisplay.client.device.DeviceCaps
 import dev.anydisplay.client.session.SessionHub
 
@@ -44,6 +46,39 @@ class SettingsActivity : BaseActivity() {
             findPreference<Preference>("paired")?.setOnPreferenceClickListener {
                 startActivity(Intent(ctx, PairedHostsActivity::class.java)); true
             }
+            // Presets stay as they were; the 25-150% slider only appears for the "Custom…" entry.
+            val scaleList = findPreference<ListPreference>(Settings.K_SCALE)
+            val scaleBar = findPreference<SeekBarPreference>(Settings.K_SCALE_PERCENT)
+            fun syncScaleSummary(value: Int) {
+                scaleBar?.summary = String.format(java.util.Locale.ROOT, "%d%%", 25 + value)
+            }
+            fun showCustom(show: Boolean) {
+                scaleBar?.isVisible = show
+                scaleBar?.isEnabled = show
+            }
+            scaleBar?.let { p ->
+                syncScaleSummary(p.value)
+                p.setOnPreferenceChangeListener { _, newValue ->
+                    if (newValue is Int) syncScaleSummary(newValue)
+                    true
+                }
+            }
+            scaleList?.setOnPreferenceChangeListener { _, newValue ->
+                showCustom(newValue == Settings.SCALE_CUSTOM)
+                true
+            }
+            showCustom(scaleList?.value == Settings.SCALE_CUSTOM)
+            // The sharpness control only applies to FSR, so it is only offered while FSR is selected.
+            val upscaler = findPreference<ListPreference>(Settings.K_UPSCALER)
+            val sharpness = findPreference<SeekBarPreference>(Settings.K_FSR_SHARPNESS)
+            fun showSharpness(fsr: Boolean) {
+                sharpness?.isVisible = fsr
+                sharpness?.isEnabled = fsr
+            }
+            upscaler?.setOnPreferenceChangeListener { _, value ->
+                showSharpness(value == Upscaler.FSR.key); true
+            }
+            showSharpness(Upscaler.of(upscaler?.value) == Upscaler.FSR)
         }
 
         override fun onResume() {
@@ -63,7 +98,7 @@ class SettingsActivity : BaseActivity() {
 
         companion object {
             private val STREAM_KEYS = setOf(
-                Settings.K_SCALE, Settings.K_REFRESH, Settings.K_CODEC, Settings.K_BITRATE, Settings.K_QUALITY,
+                Settings.K_SCALE, Settings.K_SCALE_PERCENT, Settings.K_REFRESH, Settings.K_CODEC, Settings.K_BITRATE, Settings.K_QUALITY,
                 Settings.K_HIDPI, Settings.K_AUDIO, Settings.K_CLIENT_CURSOR, Settings.K_MIRROR, Settings.K_ORIENTATION,
             )
         }

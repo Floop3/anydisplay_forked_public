@@ -3,13 +3,16 @@ package dev.anydisplay.client.ui
 import android.content.ClipboardManager
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.View
 import android.view.ViewConfiguration
@@ -29,6 +32,7 @@ import dev.anydisplay.client.R
 import dev.anydisplay.client.data.Settings
 import dev.anydisplay.client.data.StreamOrientation
 import dev.anydisplay.client.data.TouchMode
+import dev.anydisplay.client.data.Upscaler
 import dev.anydisplay.client.input.HidKeys
 import dev.anydisplay.client.input.InputRouter
 import dev.anydisplay.client.protocol.Bodies
@@ -38,6 +42,7 @@ import dev.anydisplay.client.protocol.StreamConfig
 import dev.anydisplay.client.session.Phase
 import dev.anydisplay.client.session.Session
 import dev.anydisplay.client.session.Status
+import dev.anydisplay.client.video.GpuUpscaler
 import dev.anydisplay.client.video.VideoDecoder
 
 /** Full-screen immersive display: decodes the stream onto a SurfaceView and sends touch, pen and keyboard input. */
@@ -52,6 +57,18 @@ class StreamActivity : BaseActivity(), SurfaceHolder.Callback, VideoDecoder.List
     private lateinit var router: InputRouter
     private var session: Session? = null
     private var decoder: VideoDecoder? = null
+    private var upscaler: GpuUpscaler? = null
+    private var windowSurface: Surface? = null
+    private var streamConfig: StreamConfig? = null
+    private var outputPath = PATH_NONE
+    private var outputSrcW = 0
+    private var outputSrcH = 0
+    private var surfaceW = 0
+    private var surfaceH = 0
+    private var upscalerUnsupported: Upscaler? = null
+    private var upscalerRetryAfter = 0L
+    private var lastUpscalerMode: Upscaler? = null
+    private var startingOutput = false
     private val ui = Handler(Looper.getMainLooper())
     private var lastRendered = 0L
     private var lastBytes = 0L
@@ -127,6 +144,8 @@ class StreamActivity : BaseActivity(), SurfaceHolder.Callback, VideoDecoder.List
             cursor.videoRect = r
             router.onGeometryChanged()
             cursor.invalidate()
+            // The displayed size changed (rotation, window size, stream size): the path may no longer fit.
+            ensureOutput()
         }
         cursor.onPosition = { x, y -> router.syncCursor(x, y) }
         layout.surfaceView.holder.addCallback(this)
@@ -284,29 +303,173 @@ class StreamActivity : BaseActivity(), SurfaceHolder.Callback, VideoDecoder.List
     // ------------------------------------------------------------ video
 
     private fun applyConfig(cfg: StreamConfig) {
+        streamConfig = cfg
         layout.setStreamSize(cfg.width, cfg.height)
-        layout.surfaceView.holder.setFixedSize(cfg.width, cfg.height)
+        // The GL path sizes the surface to the video rectangle; the direct path keeps the stream size.
+        if (outputPath != PATH_GPU) setSurfaceSize(cfg.width, cfg.height)
         router.streamWidth = cfg.width
         router.streamHeight = cfg.height
         router.onGeometryChanged()
         cursor.streamWidth = cfg.width
         cursor.streamHeight = cfg.height
         if (!cfg.clientCursor) cursor.clear()
+        // A new granted config is a meaningful retry point for a transient upscaler failure.
+        upscalerRetryAfter = 0
+        ensureOutput()
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        val d = VideoDecoder(holder.surface, this)
+        val changed = windowSurface !== holder.surface
+        windowSurface = holder.surface
+        if (changed) {
+            // A new Surface means a new EGL window target; drop the old decoder/EGL surface first.
+            releaseOutput()
+            upscalerRetryAfter = 0
+        }
+        ensureOutput()
+    }
+
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        // SurfaceView can resize its BufferQueue underneath an EGL window surface; restart on a real change.
+        if (width != surfaceW || height != surfaceH) {
+            upscalerRetryAfter = 0
+            releaseOutput()
+            ensureOutput()
+        }
+    }
+
+    override fun surfaceDestroyed(holder: SurfaceHolder) {
+        windowSurface = null
+        releaseOutput()
+    }
+
+    /**
+     * Chooses between the direct MediaCodec -> SurfaceView path and the GL upscaler from the granted stream size
+     * and the on-screen video rectangle, then starts or switches the output. Runs on the main thread.
+     */
+    private fun ensureOutput() {
+        if (startingOutput) return
+        val cfg = streamConfig ?: return
+        val window = windowSurface ?: return
+        val rect = layout.videoRect
+        if (rect.width() < 1f || rect.height() < 1f) return
+        if (!window.isValid) return
+        val mode = settings.upscaler
+        if (mode != lastUpscalerMode) {
+            // A different user choice is a fresh attempt even if the previous one was unsupported.
+            lastUpscalerMode = mode
+            upscalerUnsupported = null
+            upscalerRetryAfter = 0
+        }
+        val gpu = gpuWanted(cfg, rect)
+        if (outputPath != PATH_NONE) {
+            if (outputPath == PATH_GPU) {
+                if (gpu && outputSrcW == cfg.width && outputSrcH == cfg.height &&
+                    Math.round(rect.width()) == surfaceW && Math.round(rect.height()) == surfaceH
+                ) return
+            } else if (!gpu && outputSrcW == cfg.width && outputSrcH == cfg.height) {
+                return
+            }
+            releaseOutput()
+        }
+        startingOutput = true
+        try {
+            startOutput(cfg, window, rect, gpu)
+        } finally {
+            startingOutput = false
+        }
+    }
+
+    /** True when the granted stream is smaller than the pixels of the video rectangle, i.e. when enlargement is needed. */
+    private fun gpuWanted(cfg: StreamConfig, rect: RectF): Boolean {
+        val mode = settings.upscaler
+        if (mode == Upscaler.CURRENT) return false
+        if (upscalerUnsupported == mode) return false
+        // Transient surface/EGL failures retry only after a short backoff or a new surface/config.
+        if (SystemClock.uptimeMillis() < upscalerRetryAfter) return false
+        if (cfg.width <= 0 || cfg.height <= 0) return false
+        val sx = rect.width() / cfg.width
+        val sy = rect.height() / cfg.height
+        return minOf(sx, sy) > 1.02f
+    }
+
+    private fun startOutput(cfg: StreamConfig, window: Surface, rect: RectF, gpu: Boolean) {
+        if (gpu) {
+            val w = Math.max(1, Math.round(rect.width()))
+            val h = Math.max(1, Math.round(rect.height()))
+            val renderer = GpuUpscaler(settings.upscaler, settings.fsrSharpness, cfg.width, cfg.height) { message, permanent ->
+                ui.post { onUpscalerFailed(message, permanent) }
+            }
+            setSurfaceSize(w, h)
+            val started = renderer.start(window)
+            val input = renderer.inputSurface
+            if (started && input != null) {
+                upscaler = renderer
+                outputPath = PATH_GPU
+                outputSrcW = cfg.width
+                outputSrcH = cfg.height
+                Elog.i("upscaler " + settings.upscaler.key + " " + cfg.width + "x" + cfg.height + " -> " + w + "x" + h)
+                attachDecoder(input)
+                return
+            }
+            val permanent = renderer.lastFailurePermanent
+            renderer.release()
+            noteUpscalerFailure(permanent)
+            Elog.w("upscaler " + settings.upscaler.key + " start failed (" +
+                (if (permanent) "unsupported" else "transient") + "); using the direct path")
+            Snackbar.make(layout, R.string.upscaler_failed, Snackbar.LENGTH_SHORT).show()
+        }
+        setSurfaceSize(cfg.width, cfg.height)
+        outputPath = PATH_DIRECT
+        outputSrcW = cfg.width
+        outputSrcH = cfg.height
+        attachDecoder(window)
+    }
+
+    private fun attachDecoder(surface: Surface) {
+        val d = VideoDecoder(surface, this)
         decoder = d
         session?.attachVideo(d)
     }
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-
-    override fun surfaceDestroyed(holder: SurfaceHolder) {
-        val d = decoder ?: return
+    private fun releaseOutput() {
+        val d = decoder
         decoder = null
-        session?.detachVideo(d)
-        d.release()
+        if (d != null) {
+            session?.detachVideo(d)
+            d.release()
+        }
+        val g = upscaler
+        upscaler = null
+        g?.release()
+        outputPath = PATH_NONE
+        outputSrcW = 0
+        outputSrcH = 0
+        // Force the next path to apply its surface size even if the numbers happen to match.
+        surfaceW = 0
+        surfaceH = 0
+    }
+
+    private fun onUpscalerFailed(message: String, permanent: Boolean) {
+        if (outputPath != PATH_GPU) return
+        Elog.w("upscaler " + settings.upscaler.key + " failed: " + message)
+        noteUpscalerFailure(permanent)
+        releaseOutput()
+        ensureOutput()
+        Snackbar.make(layout, R.string.upscaler_failed, Snackbar.LENGTH_SHORT).show()
+    }
+
+    /** Permanent causes latch the mode until the user picks another one; transient ones retry after a backoff. */
+    private fun noteUpscalerFailure(permanent: Boolean) {
+        if (permanent) upscalerUnsupported = settings.upscaler
+        else upscalerRetryAfter = SystemClock.uptimeMillis() + 3000
+    }
+
+    private fun setSurfaceSize(w: Int, h: Int) {
+        if (w == surfaceW && h == surfaceH) return
+        surfaceW = w
+        surfaceH = h
+        layout.surfaceView.holder.setFixedSize(w, h)
     }
 
     override fun onAck(streamId: Long, frameId: Long, decodeUs: Long, rendered: Boolean, hostPtsUs: Long) {
@@ -393,8 +556,15 @@ class StreamActivity : BaseActivity(), SurfaceHolder.Callback, VideoDecoder.List
     }
 
     override fun onDestroy() {
+        releaseOutput()
         ui.removeCallbacksAndMessages(null)
         super.onDestroy()
         Elog.d("stream activity destroyed")
+    }
+
+    private companion object {
+        const val PATH_NONE = 0
+        const val PATH_DIRECT = 1
+        const val PATH_GPU = 2
     }
 }

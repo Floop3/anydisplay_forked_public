@@ -22,11 +22,33 @@ enum class StreamOrientation(val key: String) {
     }
 }
 
+/** Client-side scaling of the decoded video when the stream is smaller than the displayed video rectangle. */
+enum class Upscaler(val key: String) {
+    CURRENT("current"), FSR("fsr"), NEAREST("nearest");
+
+    companion object {
+        fun of(key: String?) = entries.firstOrNull { it.key == key } ?: CURRENT
+    }
+}
+
 /** Typed view over the user settings (res/xml/settings.xml defines the same keys and defaults). */
 class Settings(context: Context) {
     val prefs: SharedPreferences = PreferenceManager.getDefaultSharedPreferences(context.applicationContext)
 
-    val scale: Float get() = prefs.getString(K_SCALE, "1.0")?.toFloatOrNull() ?: 1f
+    /**
+     * Stream scale: a preset (1.0 native, 0.75, 0.6667, 0.5) or the custom 25-150% slider when "custom" is
+     * selected. Old saved preset values keep working unchanged.
+     */
+    val scale: Float
+        get() {
+            val preset = prefs.getString(K_SCALE, "1.0")
+            if (preset == SCALE_CUSTOM) {
+                // The SeekBar stores 0-125; 0 is 25%, 75 is 100% and 125 is 150%.
+                val percent = prefs.getInt(K_SCALE_PERCENT, 75).coerceIn(0, 125) + 25
+                return percent / 100f
+            }
+            return preset?.toFloatOrNull()?.coerceIn(0.25f, 1.5f) ?: 1f
+        }
     val refreshHz: Int get() = prefs.getString(K_REFRESH, "60")?.toIntOrNull() ?: 60
     val codec: String get() = prefs.getString(K_CODEC, "auto") ?: "auto"
     val bitrateKbps: Int get() = prefs.getString(K_BITRATE, "0")?.toIntOrNull() ?: 0
@@ -39,6 +61,9 @@ class Settings(context: Context) {
     val statsOverlay: Boolean get() = prefs.getBoolean(K_STATS, false)
     val autoStart: Boolean get() = prefs.getBoolean(K_AUTO_START, true)
     val orientation: StreamOrientation get() = StreamOrientation.of(prefs.getString(K_ORIENTATION, "landscape"))
+    val upscaler: Upscaler get() = Upscaler.of(prefs.getString(K_UPSCALER, "current"))
+    /** FSR RCAS sharpness, 0 (least) to 100 (strongest). */
+    val fsrSharpness: Int get() = prefs.getInt(K_FSR_SHARPNESS, 50).coerceIn(0, 100)
 
     val touchMode: TouchMode get() = TouchMode.of(prefs.getString(K_TOUCH_MODE, "direct"))
 
@@ -50,6 +75,8 @@ class Settings(context: Context) {
 
     companion object {
         const val K_SCALE = "scale"
+        const val K_SCALE_PERCENT = "scale_percent"
+        const val SCALE_CUSTOM = "custom"
         const val K_REFRESH = "refresh"
         const val K_CODEC = "codec"
         const val K_BITRATE = "bitrate"
@@ -63,6 +90,8 @@ class Settings(context: Context) {
         const val K_STATS = "stats_overlay"
         const val K_AUTO_START = "auto_start"
         const val K_ORIENTATION = "orientation"
+        const val K_UPSCALER = "upscaler"
+        const val K_FSR_SHARPNESS = "fsr_sharpness"
         private const val K_MENU_X = "menu_x"
         private const val K_MENU_Y = "menu_y"
     }
