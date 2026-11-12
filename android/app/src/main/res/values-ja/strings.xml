@@ -99,4 +99,12 @@
     <string name="pref_auto_start">コンピューターが接続したらディスプレイを開く</string>
     <string name="pref_paired">ペアリング済みのコンピューター</string>
     <string name="pref_applies_next">変更は次回のストリーム要求から適用されます</string>
+    <string name="stats_decode_fps">デコード %1$.0f fps</string>
+    <string name="stats_decode_rtt">デコード %1$.1f ms  RTT %2$.1f ms</string>
+    <string name="stats_latency">遅延 約 %1$.0f ms</string>
+    <string name="stats_throughput">%1$.1f Mbps  破棄 %2$d</string>
+    <string name="pref_scale_custom">カスタム解像度（25〜150%）</string>
+    <string name="pref_upscaler">拡大方式</string>
+    <string name="pref_fsr_sharpness">FSR シャープネス</string>
+    <string name="upscaler_failed">拡大を利用できないため、標準の映像表示に切り替えました</string>
 </resources>
