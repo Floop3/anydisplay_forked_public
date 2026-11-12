@@ -122,13 +122,13 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func confirm(key: String, code: String, reply: @escaping (Bool) -> Void) {
-        let name = sessions[key]?.session.deviceName ?? sessions[key]?.title ?? "the device"
+        let name = sessions[key]?.session.deviceName ?? sessions[key]?.title ?? NSLocalizedString("the device", comment: "Fallback name in the pairing alert")
         let grouped = "\(code.prefix(3)) \(code.suffix(3))"
         let alert = NSAlert()
-        alert.messageText = "Pair with \(name)?"
-        alert.informativeText = "Check that \(name) shows this code:\n\n\(grouped)"
-        alert.addButton(withTitle: "Codes Match")
-        alert.addButton(withTitle: "Cancel")
+        alert.messageText = String(format: NSLocalizedString("Pair with %@?", comment: "Pairing alert title"), name)
+        alert.informativeText = String(format: NSLocalizedString("Check that %@ shows this code:\n\n%@", comment: "Pairing alert body"), name, grouped)
+        alert.addButton(withTitle: NSLocalizedString("Codes Match", comment: "Pairing alert button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         pairingAlert = (key, alert)
         NSApp.activate(ignoringOtherApps: true)
         let response = alert.runModal()
@@ -148,23 +148,24 @@ final class AppController: NSObject, NSMenuDelegate {
         menu.removeAllItems()
 
         if !sessions.isEmpty {
-            menu.addItem(header("Connected"))
+            menu.addItem(header(NSLocalizedString("Connected", comment: "Menu section")))
             for (key, a) in sessions.sorted(by: { $0.key < $1.key }) {
                 let item = NSMenuItem(title: "\(a.title) — \(describe(a.state))", action: nil, keyEquivalent: "")
                 let sub = NSMenu()
-                sub.addItem(action("Disconnect") { [weak self] in self?.sessions[key]?.session.stop() })
+                sub.addItem(action(NSLocalizedString("Disconnect", comment: "")) { [weak self] in self?.sessions[key]?.session.stop() })
                 item.submenu = sub
                 menu.addItem(item)
             }
             menu.addItem(.separator())
         }
 
-        menu.addItem(header("Wi-Fi"))
-        if networkDevices.isEmpty { menu.addItem(disabled("No devices found")) }
+        menu.addItem(header(NSLocalizedString("Wi-Fi", comment: "Menu section")))
+        if networkDevices.isEmpty { menu.addItem(disabled(NSLocalizedString("No devices found", comment: ""))) }
         for d in networkDevices {
             let key = "net:\(d.name)"
             let paired = d.deviceID.flatMap { Data(hex: $0) }.flatMap { store.secret(for: $0) } != nil
-            let item = action(d.name + (paired ? "" : " (not paired)")) { [weak self] in
+            let title = paired ? d.name : String(format: NSLocalizedString("%@ (not paired)", comment: ""), d.name)
+            let item = action(title) { [weak self] in
                 self?.begin(key: key, title: d.name, endpoint: d.endpoint)
             }
             item.state = sessions[key] != nil ? .on : .off
@@ -172,11 +173,11 @@ final class AppController: NSObject, NSMenuDelegate {
             menu.addItem(item)
         }
 
-        menu.addItem(header("USB"))
+        menu.addItem(header(NSLocalizedString("USB", comment: "Menu section")))
         if adb == nil {
-            menu.addItem(disabled("USB needs Android Platform-Tools (adb)"))
+            menu.addItem(disabled(NSLocalizedString("USB needs Android Platform-Tools (adb)", comment: "")))
         } else if usbDevices.isEmpty {
-            menu.addItem(disabled("Unlock device and allow USB debugging"))
+            menu.addItem(disabled(NSLocalizedString("Unlock device and allow USB debugging", comment: "")))
         }
         for d in usbDevices {
             let key = "usb:\(d.serial)"
@@ -190,8 +191,8 @@ final class AppController: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-        menu.addItem(action("Connect to Address…") { [weak self] in self?.askAddress() })
-        let auto = action("Connect USB Devices Automatically") { [weak self] in
+        menu.addItem(action(NSLocalizedString("Connect to Address…", comment: "")) { [weak self] in self?.askAddress() })
+        let auto = action(NSLocalizedString("Connect USB Devices Automatically", comment: "")) { [weak self] in
             guard let self else { return }
             self.autoConnectUSB.toggle()
             self.autoConnect()
@@ -202,10 +203,10 @@ final class AppController: NSObject, NSMenuDelegate {
         if !CGPreflightScreenCaptureAccess() || !AXIsProcessTrusted() {
             menu.addItem(.separator())
             if !CGPreflightScreenCaptureAccess() {
-                menu.addItem(action("Allow Screen Recording…") { _ = CGRequestScreenCaptureAccess() })
+                menu.addItem(action(NSLocalizedString("Allow Screen Recording…", comment: "Permission menu item")) { _ = CGRequestScreenCaptureAccess() })
             }
             if !AXIsProcessTrusted() {
-                menu.addItem(action("Allow Accessibility (touch, pen, keys)…") {
+                menu.addItem(action(NSLocalizedString("Allow Accessibility (touch, pen, keys)…", comment: "Permission menu item")) {
                     let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
                     _ = AXIsProcessTrustedWithOptions(opts)
                 })
@@ -215,46 +216,48 @@ final class AppController: NSObject, NSMenuDelegate {
         let paired = store.devices
         if !paired.isEmpty {
             menu.addItem(.separator())
-            let item = NSMenuItem(title: "Paired Devices", action: nil, keyEquivalent: "")
+            let item = NSMenuItem(title: NSLocalizedString("Paired Devices", comment: ""), action: nil, keyEquivalent: "")
             let sub = NSMenu()
             for (id, d) in paired.sorted(by: { $0.value.name < $1.value.name }) {
-                sub.addItem(action("Forget \(d.name)") { [weak self] in
+                sub.addItem(action(String(format: NSLocalizedString("Forget %@", comment: ""), d.name)) { [weak self] in
                     if let data = Data(hex: id) { self?.store.forget(deviceID: data) }
                 })
             }
             sub.addItem(.separator())
-            sub.addItem(action("Forget All") { [weak self] in self?.store.forgetAll() })
+            sub.addItem(action(NSLocalizedString("Forget All", comment: "")) { [weak self] in self?.store.forgetAll() })
             item.submenu = sub
             menu.addItem(item)
         }
 
         menu.addItem(.separator())
-        menu.addItem(action("Setup & Troubleshooting…") {
+        menu.addItem(action(NSLocalizedString("Setup & Troubleshooting…", comment: "")) {
             NSWorkspace.shared.open(URL(string: "https://efekurucay.com/anydisplay/#setup")!)
         })
-        menu.addItem(action("Quit AnyDisplay") { [weak self] in self?.quit() })
+        menu.addItem(action(NSLocalizedString("Quit AnyDisplay", comment: "")) { [weak self] in self?.quit() })
     }
 
     private func describe(_ s: SessionState) -> String {
         switch s {
-        case .connecting: return "connecting"
-        case .handshaking: return "authenticating"
-        case .confirmingCode(let c): return "pairing code \(c)"
+        case .connecting: return NSLocalizedString("connecting", comment: "Session state")
+        case .handshaking: return NSLocalizedString("authenticating", comment: "Session state")
+        case .confirmingCode(let c):
+            return String(format: NSLocalizedString("pairing code %@", comment: "Session state"), c)
         case .streaming(let i):
-            return "\(i.width)×\(i.height) \(i.refreshHz) Hz \(i.codec == .hevc ? "HEVC" : "H.264")\(i.mirroring ? ", mirroring" : "")"
-        case .closed: return "closed"
+            // The rate shown here is the granted stream rate; localization of the format string only.
+            return "\(i.width)×\(i.height) \(i.refreshHz) Hz \(i.codec == .hevc ? "HEVC" : "H.264")\(i.mirroring ? NSLocalizedString(", mirroring", comment: "") : "")"
+        case .closed: return NSLocalizedString("closed", comment: "Session state")
         }
     }
 
     private func askAddress() {
         let alert = NSAlert()
-        alert.messageText = "Connect to Address"
-        alert.informativeText = "IP address or host name of the device running AnyDisplay (port 47820 unless given)."
+        alert.messageText = NSLocalizedString("Connect to Address", comment: "")
+        alert.informativeText = NSLocalizedString("IP address or host name of the device running AnyDisplay (port 47820 unless given).", comment: "")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
         field.placeholderString = "192.168.1.20"
         alert.accessoryView = field
-        alert.addButton(withTitle: "Connect")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: NSLocalizedString("Connect", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         NSApp.activate(ignoringOtherApps: true)
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return }

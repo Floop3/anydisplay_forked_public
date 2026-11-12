@@ -91,7 +91,7 @@ class ConnectionService : Service(), SessionHub.Listener {
             }
         } catch (e: Exception) {
             Elog.e("cannot listen on ${Proto.PORT}", e)
-            SessionHub.update { it.copy(phase = Phase.STOPPED, lastError = "Port ${Proto.PORT} is in use") }
+            SessionHub.update { it.copy(phase = Phase.STOPPED, lastError = getString(R.string.error_port_in_use, Proto.PORT)) }
             return
         }
         server = ss

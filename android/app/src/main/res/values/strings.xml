@@ -13,6 +13,7 @@
     <string name="last_error">Last session: %1$s</string>
     <string name="open_display">Open display</string>
     <string name="start_service">Start</string>
+    <string name="error_port_in_use">Port %1$d is in use</string>
 
     <string name="wifi_title">Wi-Fi</string>
     <string name="wifi_detail">Keep this device on the same network as the computer. AnyDisplay on the computer lists it automatically, or you can enter this address:</string>
