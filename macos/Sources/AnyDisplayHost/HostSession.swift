@@ -24,6 +24,8 @@ public struct StreamInfo: Sendable {
     public let width: Int
     public let height: Int
     public let refreshHz: Int
+    /// Refresh rate the display mode actually reports; 0 when the system does not report one.
+    public let displayRefreshHz: Double
     public let codec: Codec
     public let bitrateKbps: Int
     public let hardwareEncoder: Bool
@@ -83,7 +85,8 @@ public final class HostSession {
     private var noticesSent = Set<UInt16>()
 
     // Flow control (PROTOCOL.md 5.2)
-    private static let maxUnacked = 3
+    /// Bounded in-flight window; computed per stream from the granted rate.
+    private var maxInFlight = 3
     private var streamID: UInt32 = 0
     private var nextFrameID: UInt32 = 0
     private var ackedFrames: UInt32 = 0  // highest acked frame_id + 1
@@ -93,6 +96,20 @@ public final class HostSession {
     private var latestPending = false
     private var lastEncodePTS = CMTime.zero
     public private(set) var framesSent: UInt64 = 0
+
+    // Verbose diagnostics: a handful of counters read once per second, no per-frame logging.
+    private var displayRefreshHz: Double = 0
+    private var capturedFrames: UInt64 = 0
+    private var skippedCaptures: UInt64 = 0
+    private var encoderDrops: UInt64 = 0
+    private var encodeSubmitTimes: [TimeInterval] = []
+    private var lastEncodeMs: Double = 0
+    private var diagTime = CACurrentMediaTime()
+    private var diagCaptured: UInt64 = 0
+    private var diagSkipped: UInt64 = 0
+    private var diagDropped: UInt64 = 0
+    private var diagSent: UInt64 = 0
+    private var diagBytes: UInt64 = 0
 
     public init(endpoint: NWEndpoint, store: PairingStore, options: SessionOptions = SessionOptions()) {
         self.endpoint = endpoint
@@ -310,6 +327,7 @@ public final class HostSession {
             }
             conn.send(Ping(seq: self.pingSeq, senderTimeUs: Self.nowUs))
             self.pingSeq &+= 1
+            self.logPipeline()
         }
         t.resume()
         keepaliveTimer = t
@@ -352,7 +370,10 @@ public final class HostSession {
 
         var fps = Int(req.refreshHz == 0 ? 60 : req.refreshHz)
         if info.maxRefresh >= 1 { fps = min(fps, Int(info.maxRefresh.rounded())) }
-        fps = min(max(fps, 1), 120)
+        fps = min(max(fps, 1), 144)
+        // 3 credits keep latency tight at 60 Hz and below; high-refresh streams need enough credits to
+        // cover one frame round trip (3 credits cap throughput at 3/round-trip, ~61 fps at 49 ms).
+        maxInFlight = Self.creditWindow(forFPS: fps)
 
         // Codec: honour the request when the client can decode it and we can encode it.
         let canDecode = { (c: Codec) in info.codecs & (1 << (c.rawValue - 1)) != 0 }
@@ -371,6 +392,7 @@ public final class HostSession {
                                                      hidpi: requested.contains(.hidpi)) {
                 displayID = vd.displayID
                 logical = CGDisplayBounds(vd.displayID).size
+                displayRefreshHz = vd.effectiveRefreshHz
                 if hidpi { granted.insert(.hidpi) }
             } else {
                 mirror = true
@@ -380,6 +402,7 @@ public final class HostSession {
         if mirror {
             virtualDisplay = nil
             displayID = CGMainDisplayID()
+            displayRefreshHz = CGDisplayCopyDisplayMode(displayID)?.refreshRate ?? 0
             let b = CGDisplayBounds(displayID)
             logical = b.size
             // Keep the main display's aspect ratio inside the requested size.
@@ -397,6 +420,7 @@ public final class HostSession {
         nextFrameID = 0
         ackedFrames = 0
         pendingEncodes = 0
+        lastEncodeMs = 0
         needKeyframe = true
         latest = nil
         latestPending = false
@@ -425,7 +449,11 @@ public final class HostSession {
                             bitrateKbps: UInt32(kbps), flags: granted.rawValue, logicalW: UInt16(logical.width),
                             logicalH: UInt16(logical.height), hostCaps: caps.rawValue)
         connection?.send(config)
-        Log.info("CONFIG stream=\(sid) \(w)x\(h)@\(fps) \(codec == .hevc ? "HEVC" : "H.264") \(kbps) kbps flags=0x\(String(granted.rawValue, radix: 16)) logical=\(Int(logical.width))x\(Int(logical.height)) display=\(displayID) hw=\(enc.isHardware)")
+        let reportedHz = displayRefreshHz > 0 ? "\(Int(displayRefreshHz.rounded())) Hz" : "unknown"
+        Log.info("CONFIG stream=\(sid) \(w)x\(h)@\(fps) \(codec == .hevc ? "HEVC" : "H.264") \(kbps) kbps flags=0x\(String(granted.rawValue, radix: 16)) logical=\(Int(logical.width))x\(Int(logical.height)) display=\(displayID) displayHz=\(reportedHz) hw=\(enc.isHardware)")
+        if displayRefreshHz > 0, abs(displayRefreshHz - Double(fps)) > 1 {
+            Log.info("display \(displayID) reports \(Int(displayRefreshHz.rounded())) Hz, not the requested \(fps) Hz; frames are captured and encoded at \(fps) Hz but presentation cannot exceed the display rate")
+        }
         if audio {
             connection?.send(AudioConfig(sampleRate: UInt32(ScreenCapturer.audioSampleRate),
                                          channels: UInt8(ScreenCapturer.audioChannels), codec: 0))
@@ -481,8 +509,9 @@ public final class HostSession {
 
         phase = .streaming
         let si = StreamInfo(deviceName: result?.deviceName ?? "", authMode: result?.mode ?? .none, width: w, height: h,
-                            refreshHz: fps, codec: codec, bitrateKbps: kbps, hardwareEncoder: enc.isHardware,
-                            mirroring: mirror, logicalWidth: Int(logical.width), logicalHeight: Int(logical.height))
+                            refreshHz: fps, displayRefreshHz: displayRefreshHz, codec: codec, bitrateKbps: kbps,
+                            hardwareEncoder: enc.isHardware, mirroring: mirror,
+                            logicalWidth: Int(logical.width), logicalHeight: Int(logical.height))
         streamInfo = si
         notify(.streaming(si))
     }
@@ -530,10 +559,23 @@ public final class HostSession {
         return vd
     }
 
+    /// In-flight credits for the granted rate, inclusive of pending encodes.
+    static func creditWindow(forFPS fps: Int) -> Int {
+        switch fps {
+        case ..<75: return 3
+        case ..<105: return 5
+        case ..<130: return 6
+        default: return 8
+        }
+    }
+
     static func autoBitrate(width: Int, height: Int, fps: Int, quality: Int, codec: Codec) -> Int {
         let q = Double(quality == 0 ? 80 : min(max(quality, 1), 100)) / 100
         let bitsPerPixel = 0.03 + 0.09 * q
-        var kbps = Double(width * height) * Double(min(fps, 60)) * bitsPerPixel / 1000
+        // Above 60 fps the picture is motion-bound: grow the budget sublinearly so 120 fps does not roughly
+        // double bitrate and make congestion worse. Still linear below 60 fps.
+        let rate = fps <= 60 ? Double(max(fps, 1)) : 60 * (Double(fps) / 60).squareRoot()
+        var kbps = Double(width * height) * rate * bitsPerPixel / 1000
         if codec == .hevc { kbps *= 0.7 }
         return Int(min(max(kbps, 2000), 60000))
     }
@@ -551,6 +593,29 @@ public final class HostSession {
         encoder = nil
         cursor?.stop()
         cursor = nil
+        encodeSubmitTimes.removeAll()
+    }
+
+    /// One verbose line per second with the stage counters needed to tell capture, encode and
+    /// flow-control stalls apart. Costs one dictionary lookup per second at most.
+    private func logPipeline() {
+        guard phase == .streaming, Log.verbose else { return }
+        let now = CACurrentMediaTime()
+        let dt = max(now - diagTime, 0.001)
+        let captured = capturedFrames &- diagCaptured
+        let skipped = skippedCaptures &- diagSkipped
+        let dropped = encoderDrops &- diagDropped
+        let sent = framesSent &- diagSent
+        let totalBytes = connection?.bytesSent ?? 0
+        let bytes = totalBytes >= diagBytes ? totalBytes - diagBytes : totalBytes
+        let hz = displayRefreshHz > 0 ? "\(Int(displayRefreshHz.rounded()))Hz" : "unknown"
+        Log.debug("pipeline display=\(hz) captured=\(Int(Double(captured) / dt))fps encoded=\(Int(Double(sent) / dt))fps skipped=\(skipped) encDrops=\(dropped) requested=\(streamInfo?.refreshHz ?? 0)Hz inFlight=\(inFlight)/\(maxInFlight) pendingEncodes=\(pendingEncodes) encode=\(Int(lastEncodeMs))ms queuedVideo=\(connection?.queuedFrames(.video) ?? 0) kbps=\(Int(Double(bytes) * 8 / dt / 1000))")
+        diagTime = now
+        diagCaptured = capturedFrames
+        diagSkipped = skippedCaptures
+        diagDropped = encoderDrops
+        diagSent = framesSent
+        diagBytes = totalBytes
     }
 
     // MARK: - Video pipeline and flow control
@@ -559,6 +624,8 @@ public final class HostSession {
 
     private func onCaptured(_ pb: CVPixelBuffer, streamID sid: UInt32) {
         guard sid == streamID, phase == .streaming else { return }
+        capturedFrames &+= 1
+        if latestPending { skippedCaptures &+= 1 }
         latest = pb
         latestPending = true
         submitIfPossible()
@@ -567,12 +634,13 @@ public final class HostSession {
     /// Encodes the newest captured frame unless 3 frames are unacknowledged; skipped captures are
     /// replaced by newer ones, so the client catches up to the current screen as soon as acks arrive.
     private func submitIfPossible() {
-        guard let enc = encoder, latestPending, let pb = latest, inFlight < Self.maxUnacked else { return }
+        guard let enc = encoder, latestPending, let pb = latest, inFlight < maxInFlight else { return }
         latestPending = false
         var pts = CMTime(seconds: CACurrentMediaTime(), preferredTimescale: 1_000_000)
         if pts <= lastEncodePTS { pts = lastEncodePTS + CMTime(value: 1, timescale: 1_000_000) }
         lastEncodePTS = pts
         pendingEncodes += 1
+        encodeSubmitTimes.append(CACurrentMediaTime())
         let key = needKeyframe
         needKeyframe = false
         enc.encode(pb, pts: pts, forceKeyframe: key)
@@ -581,6 +649,7 @@ public final class HostSession {
     private func onEncoded(_ out: VideoEncoder.Output, streamID sid: UInt32) {
         guard sid == streamID, let conn = connection else { return }
         pendingEncodes = max(pendingEncodes - 1, 0)
+        if !encodeSubmitTimes.isEmpty { lastEncodeMs = (CACurrentMediaTime() - encodeSubmitTimes.removeFirst()) * 1000 }
         if nextFrameID == 0, !out.keyframe {
             // The first frame of a stream must be a keyframe; drop and force one.
             needKeyframe = true
@@ -599,6 +668,8 @@ public final class HostSession {
     private func onEncodeDropped(streamID sid: UInt32) {
         guard sid == streamID else { return }
         pendingEncodes = max(pendingEncodes - 1, 0)
+        encoderDrops &+= 1
+        if !encodeSubmitTimes.isEmpty { lastEncodeMs = (CACurrentMediaTime() - encodeSubmitTimes.removeFirst()) * 1000 }
         if nextFrameID == 0 { needKeyframe = true }
         submitIfPossible()
     }
@@ -643,7 +714,7 @@ public final class HostSession {
         }
         connection = nil
         if let error { Log.error("session closed: \(error)") } else { Log.info("session closed") }
-        Log.info("sent \(framesSent) video frames")
+        Log.info("sent \(framesSent) video frames (captured \(capturedFrames), skipped \(skippedCaptures), encoder drops \(encoderDrops))")
         notify(.closed(error: error))
     }
 

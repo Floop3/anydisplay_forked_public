@@ -83,7 +83,8 @@ class Session(
     private val framesDecoded = AtomicInteger()
     private val framesDropped = AtomicInteger()
     private val decodeUsSum = AtomicLong()
-    val totalRendered = AtomicLong()
+    /** Frames released to the Surface (decoded and handed to the compositor), not confirmed presentations. */
+    val totalReleased = AtomicLong()
     val totalDropped = AtomicLong()
     val totalBytes = AtomicLong()
     /** Bytes received so far, for the overlay's bitrate. */
@@ -257,7 +258,7 @@ class Session(
         val vf = try { VideoFrame.decode(f.body) } catch (e: Exception) { Elog.w("bad VIDEO_FRAME: ${e.message}"); return }
         val sink = videoSink
         if (sink == null || config == null) {
-            ack(vf.streamId, vf.frameId, 0, rendered = false)
+            ack(vf.streamId, vf.frameId, 0, released = false)
             return
         }
         sink.onFrame(vf, System.nanoTime())
@@ -348,13 +349,13 @@ class Session(
         send(Proto.CH_CONTROL, Proto.CLIPBOARD, Bodies.clipboard(Proto.MIME_TEXT, text.toByteArray(Charsets.UTF_8)))
     }
 
-    /** FRAME_ACK after render or drop (PROTOCOL.md 5.2). */
-    fun ack(streamId: Long, frameId: Long, decodeUs: Long, rendered: Boolean, hostPtsUs: Long = 0) {
+    /** FRAME_ACK after release to the Surface or drop (PROTOCOL.md 5.2). */
+    fun ack(streamId: Long, frameId: Long, decodeUs: Long, released: Boolean, hostPtsUs: Long = 0) {
         send(Proto.CH_VIDEO, Proto.FRAME_ACK, Bodies.frameAck(streamId, frameId, decodeUs))
-        if (rendered) {
+        if (released) {
             framesDecoded.incrementAndGet()
             decodeUsSum.addAndGet(decodeUs)
-            totalRendered.incrementAndGet()
+            totalReleased.incrementAndGet()
             val off = hostOffsetUs
             if (off != null && hostPtsUs > 0) {
                 val lat = epochUs() + off - hostPtsUs

@@ -21,7 +21,8 @@ import java.util.ArrayDeque
  */
 class VideoDecoder(private val surface: Surface, private val listener: Listener) : VideoSink {
     interface Listener {
-        fun onAck(streamId: Long, frameId: Long, decodeUs: Long, rendered: Boolean, hostPtsUs: Long)
+        /** [released] is true when the frame was released to the Surface; it is not a physical presentation measurement. */
+        fun onAck(streamId: Long, frameId: Long, decodeUs: Long, released: Boolean, hostPtsUs: Long)
         fun onKeyframeNeeded()
         fun onDecoderStarted(name: String, config: StreamConfig)
     }
@@ -133,6 +134,7 @@ class VideoDecoder(private val surface: Surface, private val listener: Listener)
             } catch (e: Exception) {
                 Elog.w("releaseOutputBuffer failed: ${e.message}")
             }
+            // "render" here means released to the Surface (queue-buffer timestamp), not confirmed presentation.
             match?.let { listener.onAck(it.streamId, it.frameId, (now - it.queuedNanos) / 1000, render, it.hostPtsUs) }
         }
 
@@ -150,7 +152,7 @@ class VideoDecoder(private val surface: Surface, private val listener: Listener)
     private fun start(cfg: StreamConfig) {
         stopCodec()
         config = cfg
-        val choice = DeviceCaps.decoders()[cfg.codec]
+        val choice = DeviceCaps.decoderFor(cfg.codec, cfg.width, cfg.height, cfg.refreshHz)
         val mime = DeviceCaps.mimeOf(cfg.codec)
         val attempts = listOf(true to true, false to true, false to false)
         for ((vendorKeys, tuning) in attempts) {
@@ -182,7 +184,9 @@ class VideoDecoder(private val surface: Surface, private val listener: Listener)
         if (tuning) {
             if (Build.VERSION.SDK_INT >= 30) f.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             f.setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime
-            f.setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
+            // Frame rate the stream actually runs at; vendors size buffers from this hint, not from 32767.
+            val hz = cfg.refreshHz
+            if (hz > 0) f.setInteger(MediaFormat.KEY_OPERATING_RATE, hz)
         }
         if (vendorKeys) {
             val n = name.lowercase()

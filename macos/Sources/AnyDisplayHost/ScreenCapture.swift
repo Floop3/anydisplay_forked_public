@@ -92,6 +92,7 @@ public final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
             config.channelCount = Self.audioChannels
             config.excludesCurrentProcessAudio = true
         }
+        Log.debug("capture display=\(settings.displayID) \(settings.width)x\(settings.height)@{minInterval=\(config.minimumFrameInterval.value)/\(config.minimumFrameInterval.timescale)} depth=\(config.queueDepth) audio=\(settings.captureAudio)")
         let s = SCStream(filter: filter, configuration: config, delegate: self)
         do {
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
