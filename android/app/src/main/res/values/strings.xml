@@ -84,6 +84,10 @@
     <string name="pref_cat_input">Input</string>
     <string name="pref_cat_connection">Connection</string>
     <string name="pref_scale">Resolution</string>
+    <string name="pref_scale_custom">Custom resolution (25–150%)</string>
+    <string name="pref_upscaler">Upscaling</string>
+    <string name="pref_fsr_sharpness">FSR sharpness</string>
+    <string name="upscaler_failed">Upscaling is unavailable; using the direct video path</string>
     <string name="pref_refresh">Refresh rate</string>
     <string name="pref_codec">Video codec</string>
     <string name="pref_bitrate">Bitrate</string>
