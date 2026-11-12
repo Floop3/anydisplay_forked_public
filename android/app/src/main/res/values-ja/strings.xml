@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AnyDisplay</string>
+
+    <string name="status_waiting">コンピューターを待機中</string>
+    <string name="status_waiting_detail">Mac または Windows PC で AnyDisplay を起動してください。同じ Wi-Fi または USB 経由でこのデバイスを自動的に見つけます。</string>
+    <string name="status_handshake">接続中…</string>
+    <string name="status_pairing">%1$s とペアリング中</string>
+    <string name="status_pairing_detail">両方の画面に表示されるコードを確認してください。</string>
+    <string name="status_connected">%1$s に接続済み</string>
+    <string name="status_stopped">待機していません</string>
+    <string name="status_stopped_detail">接続サービスが停止しています。</string>
+    <string name="last_error">前回のセッション: %1$s</string>
+    <string name="open_display">ディスプレイを開く</string>
+    <string name="start_service">開始</string>
+    <string name="error_port_in_use">ポート %1$d は使用中です</string>
+
+    <string name="wifi_title">Wi-Fi</string>
+    <string name="wifi_detail">このデバイスをコンピューターと同じネットワークに接続してください。コンピューター側の AnyDisplay が自動的に一覧に表示します。次のアドレスを直接入力することもできます:</string>
+    <string name="wifi_none">Wi-Fi のアドレスがありません。Wi-Fi に接続するか USB を使用してください。</string>
+    <string name="usb_title">USB</string>
+    <string name="usb_detail">1. 開発者向けオプションで USB デバッグを有効にします。\n2. ケーブルを接続し、このデバイスでデバッグを許可します。\n3. コンピューター側の AnyDisplay がポートを転送して接続します。手動で行う場合:</string>
+    <string name="usb_command">adb forward tcp:47820 tcp:47820</string>
+    <string name="device_footer">デバイス ID %1$s · バージョン %2$s</string>
+    <string name="copied">コピーしました</string>
+
+    <string name="paired_computers">ペアリング済みのコンピューター</string>
+    <string name="paired_empty">ペアリング済みのコンピューターはまだありません。Wi-Fi で初めて接続したときにペアリングされます。</string>
+    <string name="paired_detail">%1$s · ペアリング %2$s · 最終使用 %3$s</string>
+    <string name="just_now">たった今</string>
+    <string name="forget">削除</string>
+    <string name="forget_title">%1$s を削除しますか？</string>
+    <string name="forget_message">次回 Wi-Fi で接続するときに、コンピューターとコードを使って再ペアリングが必要になります。</string>
+    <string name="cancel">キャンセル</string>
+
+    <string name="settings">設定</string>
+    <string name="accept">許可</string>
+    <string name="reject">拒否</string>
+    <string name="pairing_title">%1$s とペアリングしますか？</string>
+    <string name="pairing_message">%1$s に同じコードが表示されていることを確認し、両方のデバイスで許可してください。</string>
+    <string name="pairing_notif_title">%1$s とペアリングしますか？</string>
+    <string name="pairing_notif_text">コード %1$s。コンピューターに同じコードが表示されている場合のみ許可してください。</string>
+
+    <string name="channel_connection">接続</string>
+    <string name="channel_pairing">ペアリング要求</string>
+    <string name="notif_waiting">AnyDisplay はコンピューターを待機しています</string>
+    <string name="notif_usb_only">USB のみ（Wi-Fi のアドレスなし）</string>
+    <string name="notif_handshake">AnyDisplay: 接続中</string>
+    <string name="notif_pairing">%1$s とペアリングしますか？</string>
+    <string name="notif_pairing_text">AnyDisplay を開いてコードを確認してください</string>
+    <string name="notif_connected">%1$s を拡張中</string>
+    <string name="disconnect">切断</string>
+    <string name="stop_service">停止</string>
+    <string name="link_usb_adb">USB</string>
+    <string name="link_usb_accessory">USB アクセサリ</string>
+    <string name="link_wifi">Wi-Fi</string>
+    <string name="mode_plain">未暗号化のケーブル接続</string>
+    <string name="mode_encrypted">暗号化済み</string>
+
+    <string name="disconnected">切断されました</string>
+    <string name="still_connected">接続は維持されています。AnyDisplay または通知からディスプレイを開き直してください。</string>
+    <string name="disconnect_title">%1$s から切断しますか？</string>
+    <string name="touch_mode_direct">直接タッチ</string>
+    <string name="touch_mode_trackpad">トラックパッド</string>
+    <string name="touch_mode_pen">ペンのみ</string>
+    <string name="menu_toggle">メニュー</string>
+    <string name="menu_keyboard">キーボード</string>
+    <string name="menu_undo">元に戻す</string>
+    <string name="menu_redo">やり直す</string>
+    <string name="menu_copy">コピー</string>
+    <string name="menu_paste">貼り付け</string>
+    <string name="menu_escape">Escape</string>
+    <string name="menu_touch_mode">タッチモード</string>
+    <string name="waiting_for_video">映像を待機中…</string>
+    <!-- サーフェスに渡したフレーム数であり、実際の表示計測ではありません。 -->
+    <string name="notification_permission">バックグラウンドでペアリングコードの確認を求めるため、通知を許可してください。</string>
+
+    <!-- Settings -->
+    <string name="pref_cat_display">ディスプレイ</string>
+    <string name="pref_cat_input">入力</string>
+    <string name="pref_cat_connection">接続</string>
+    <string name="pref_scale">解像度</string>
+    <string name="pref_refresh">リフレッシュレート</string>
+    <string name="pref_codec">映像コーデック</string>
+    <string name="pref_bitrate">ビットレート</string>
+    <string name="pref_quality">画質</string>
+    <string name="pref_hidpi">HiDPI（Retina）</string>
+    <string name="pref_hidpi_summary">デスクトップを半分のピクセルサイズで描画し、文字をくっきり表示します</string>
+    <string name="pref_orientation">画面の向き</string>
+    <string name="pref_mirror">拡張ではなくミラーリング</string>
+    <string name="pref_mirror_summary">新しいディスプレイを追加せず、メインディスプレイを表示します</string>
+    <string name="pref_audio">コンピューターの音声を再生</string>
+    <string name="pref_client_cursor">カーソルをこのデバイスに描画</string>
+    <string name="pref_client_cursor_summary">コンピューターが対応している場合、カーソルの遅延が小さくなります</string>
+    <string name="pref_stats">遅延と FPS のオーバーレイを表示</string>
+    <string name="pref_touch_mode">既定のタッチモード</string>
+    <string name="pref_palm">パームリジェクション</string>
+    <string name="pref_palm_summary">ペンが画面に近づいている間は指の入力を無視します</string>
+    <string name="pref_auto_start">コンピューターが接続したらディスプレイを開く</string>
+    <string name="pref_paired">ペアリング済みのコンピューター</string>
+    <string name="pref_applies_next">変更は次回のストリーム要求から適用されます</string>
+</resources>
