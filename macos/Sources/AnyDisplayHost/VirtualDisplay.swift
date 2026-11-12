@@ -12,6 +12,9 @@ public final class VirtualDisplay {
     private let display: CGVirtualDisplay
     public let maxPixels: Int
 
+    /// Refresh rate CoreGraphics reports for the selected mode; 0 when it reports none.
+    public private(set) var effectiveRefreshHz: Double = 0
+
     /// - Parameter maxPixels: the largest pixel edge later `apply` calls may use (covers rotation).
     public init?(name: String, serial: UInt32, sizeMillimeters: CGSize, maxPixels: Int) {
         let desc = CGVirtualDisplayDescriptor()
@@ -45,7 +48,9 @@ public final class VirtualDisplay {
         settings.hiDPI = hidpi ? 1 : 0
         settings.modes = [CGVirtualDisplayMode(width: UInt(pointsW), height: UInt(pointsH), refreshRate: refreshHz)]
         guard display.apply(settings) else { return false }
-        return select(pointsW: pointsW, pointsH: pointsH, pixelW: pixelWidth, pixelH: pixelHeight)
+        let ok = select(pointsW: pointsW, pointsH: pointsH, pixelW: pixelWidth, pixelH: pixelHeight, refreshHz: refreshHz)
+        effectiveRefreshHz = CGDisplayCopyDisplayMode(displayID)?.refreshRate ?? 0
+        return ok
     }
 
     /// Current desktop size in points and pixels, once the display is online.
@@ -54,24 +59,35 @@ public final class VirtualDisplay {
         return (CGSize(width: mode.width, height: mode.height), CGSize(width: mode.pixelWidth, height: mode.pixelHeight))
     }
 
-    private func matches(_ m: CGDisplayMode, _ pw: Int, _ ph: Int, _ xw: Int, _ xh: Int) -> Bool {
-        m.width == pw && m.height == ph && m.pixelWidth == xw && m.pixelHeight == xh
+    private func matches(_ m: CGDisplayMode, _ pw: Int, _ ph: Int, _ xw: Int, _ xh: Int, _ hz: Double) -> Bool {
+        guard m.width == pw, m.height == ph, m.pixelWidth == xw, m.pixelHeight == xh else { return false }
+        // 0 Hz means CoreGraphics does not report a rate; accept the geometry instead of rejecting a usable mode.
+        guard hz > 0, m.refreshRate > 0 else { return true }
+        return abs(m.refreshRate - hz) < 1
     }
 
-    private func select(pointsW: Int, pointsH: Int, pixelW: Int, pixelH: Int) -> Bool {
+    private func select(pointsW: Int, pointsH: Int, pixelW: Int, pixelH: Int, refreshHz: Double) -> Bool {
         let opts = [kCGDisplayShowDuplicateLowResolutionModes: true] as CFDictionary
         let deadline = Date().addingTimeInterval(3)
         var target: CGDisplayMode?
+        var fallback: CGDisplayMode?
         while Date() < deadline {
-            if let cur = CGDisplayCopyDisplayMode(displayID), matches(cur, pointsW, pointsH, pixelW, pixelH) { return true }
-            let modes = (CGDisplayCopyAllDisplayModes(displayID, opts) as? [CGDisplayMode]) ?? []
-            target = modes.first { $0.isUsableForDesktopGUI() && matches($0, pointsW, pointsH, pixelW, pixelH) }
-            if target != nil { break }
+            if let cur = CGDisplayCopyDisplayMode(displayID),
+               matches(cur, pointsW, pointsH, pixelW, pixelH, refreshHz) { return true }
+            let modes = ((CGDisplayCopyAllDisplayModes(displayID, opts) as? [CGDisplayMode]) ?? [])
+                .filter { $0.isUsableForDesktopGUI() }
+            target = modes.first { matches($0, pointsW, pointsH, pixelW, pixelH, refreshHz) }
+            fallback = modes.first { matches($0, pointsW, pointsH, pixelW, pixelH, 0) }
+            if target != nil || fallback != nil { break }
             Thread.sleep(forTimeInterval: 0.05)
+        }
+        if target == nil, let fallback {
+            Log.info("virtual display \(displayID): \(Int(refreshHz.rounded())) Hz at \(pointsW)x\(pointsH) not offered; mode reports \(fallback.refreshRate) Hz")
+            target = fallback
         }
         guard let target else {
             let offered = ((CGDisplayCopyAllDisplayModes(displayID, opts) as? [CGDisplayMode]) ?? [])
-                .filter { $0.isUsableForDesktopGUI() }.map { "\($0.width)x\($0.height)@\($0.pixelWidth)x\($0.pixelHeight)" }
+                .filter { $0.isUsableForDesktopGUI() }.map { "\($0.width)x\($0.height)@\($0.pixelWidth)x\($0.pixelHeight)@\(Int($0.refreshRate.rounded()))Hz" }
             Log.info("virtual display \(displayID): mode \(pointsW)x\(pointsH)@\(pixelW)x\(pixelH) not offered; online=\(CGDisplayIsOnline(displayID)) offered=\(offered)")
             return false
         }
@@ -80,7 +96,9 @@ public final class VirtualDisplay {
         CGConfigureDisplayWithDisplayMode(config, displayID, target, nil)
         guard CGCompleteDisplayConfiguration(config, .forSession) == .success else { return false }
         while Date() < deadline {
-            if let cur = CGDisplayCopyDisplayMode(displayID), matches(cur, pointsW, pointsH, pixelW, pixelH) { return true }
+            // The display may come online at another rate than requested; geometry is what we verify here and
+            // effectiveRefreshHz reports what actually ran.
+            if let cur = CGDisplayCopyDisplayMode(displayID), matches(cur, pointsW, pointsH, pixelW, pixelH, 0) { return true }
             Thread.sleep(forTimeInterval: 0.05)
         }
         return false

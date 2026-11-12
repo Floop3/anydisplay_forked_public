@@ -72,6 +72,11 @@
     <string name="menu_escape">Escape</string>
     <string name="menu_touch_mode">Touch mode</string>
     <string name="waiting_for_video">Waiting for video…</string>
+    <!-- Frames released to the Surface, which is not a confirmed presentation measurement. -->
+    <string name="stats_decode_fps">decode %1$.0f fps</string>
+    <string name="stats_decode_rtt">decode %1$.1f ms  rtt %2$.1f ms</string>
+    <string name="stats_latency">latency ≈ %1$.0f ms</string>
+    <string name="stats_throughput">%1$.1f Mbps  dropped %2$d</string>
     <string name="notification_permission">Allow notifications so AnyDisplay can ask you to confirm pairing codes in the background.</string>
 
     <!-- Settings -->

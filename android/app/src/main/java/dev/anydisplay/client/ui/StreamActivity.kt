@@ -53,7 +53,7 @@ class StreamActivity : BaseActivity(), SurfaceHolder.Callback, VideoDecoder.List
     private var session: Session? = null
     private var decoder: VideoDecoder? = null
     private val ui = Handler(Looper.getMainLooper())
-    private var lastRendered = 0L
+    private var lastReleased = 0L
     private var lastBytes = 0L
     private var lastStatsAt = 0L
     private var keyboardShown = false
@@ -309,9 +309,9 @@ class StreamActivity : BaseActivity(), SurfaceHolder.Callback, VideoDecoder.List
         d.release()
     }
 
-    override fun onAck(streamId: Long, frameId: Long, decodeUs: Long, rendered: Boolean, hostPtsUs: Long) {
-        session?.ack(streamId, frameId, decodeUs, rendered, hostPtsUs)
-        if (rendered && waiting.visibility == View.VISIBLE) ui.post { waiting.visibility = View.GONE }
+    override fun onAck(streamId: Long, frameId: Long, decodeUs: Long, released: Boolean, hostPtsUs: Long) {
+        session?.ack(streamId, frameId, decodeUs, released, hostPtsUs)
+        if (released && waiting.visibility == View.VISIBLE) ui.post { waiting.visibility = View.GONE }
     }
 
     override fun onKeyframeNeeded() {
@@ -371,24 +371,24 @@ class StreamActivity : BaseActivity(), SurfaceHolder.Callback, VideoDecoder.List
         val s = session ?: return
         if (!settings.statsOverlay) return
         val now = System.nanoTime()
-        val rendered = s.totalRendered.get()
+        val released = s.totalReleased.get()
         val bytes = s.bytesSoFar()
         val dt = (now - lastStatsAt) / 1e9
         if (lastStatsAt != 0L && dt > 0) {
-            val fps = (rendered - lastRendered) / dt
+            val fps = (released - lastReleased) / dt
             val cfg = s.config
             val lat = s.lastLatencyUs
             stats.text = buildString {
-                append("%.0f fps".format(fps))
+                append(getString(R.string.stats_decode_fps, fps))
                 if (cfg != null) append("  ${cfg.width}×${cfg.height} ${Proto.codecName(cfg.codec)}")
-                append("\ndecode %.1f ms  rtt %.1f ms".format(s.lastAvgDecodeUs / 1000.0, s.rttUs / 1000.0))
-                if (lat >= 0) append("\nlatency ≈ %.0f ms".format(lat / 1000.0))
-                append("\n%.1f Mbps  dropped %d".format((bytes - lastBytes) * 8 / dt / 1e6, s.totalDropped.get()))
+                append("\n" + getString(R.string.stats_decode_rtt, s.lastAvgDecodeUs / 1000.0, s.rttUs / 1000.0))
+                if (lat >= 0) append("\n" + getString(R.string.stats_latency, lat / 1000.0))
+                append("\n" + getString(R.string.stats_throughput, (bytes - lastBytes) * 8 / dt / 1e6, s.totalDropped.get()))
                 decoder?.decoderName?.takeIf { it.isNotEmpty() }?.let { append("\n$it") }
             }
         }
         lastStatsAt = now
-        lastRendered = rendered
+        lastReleased = released
         lastBytes = bytes
     }
 

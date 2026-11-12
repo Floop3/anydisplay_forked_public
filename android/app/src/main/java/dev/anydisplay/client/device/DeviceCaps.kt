@@ -12,6 +12,7 @@ import android.view.Display
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.Surface
+import dev.anydisplay.client.Elog
 import dev.anydisplay.client.data.Settings
 import dev.anydisplay.client.data.StreamOrientation
 import dev.anydisplay.client.protocol.ConfigReq
@@ -33,6 +34,14 @@ data class DecoderChoice(
     private val caps: MediaCodecInfo.VideoCapabilities?,
 ) {
     fun supports(w: Int, h: Int): Boolean = caps?.isSizeSupported(w, h) ?: (w <= maxW && h <= maxH)
+
+    /** Size and rate the codec reports as achievable; unknown capabilities fall back to the size range. */
+    fun supports(w: Int, h: Int, fps: Int): Boolean = try {
+        val c = caps ?: return w <= maxW && h <= maxH
+        c.isSizeSupported(w, h) && (fps <= 0 || c.areSizeAndRateSupported(w, h, fps.toDouble()))
+    } catch (_: Exception) {
+        w <= maxW && h <= maxH
+    }
 }
 
 /** Everything DEVICE_INFO and CONFIG_REQ need to know about this device. */
@@ -43,17 +52,18 @@ object DeviceCaps {
         else -> "video/avc"
     }
 
+    private var candidateCache: Map<Int, List<DecoderChoice>>? = null
     private var decoderCache: Map<Int, DecoderChoice>? = null
 
-    /** Best decoder per codec: hardware first, then one advertising low latency, then the largest size range. */
+    /** All decoders per codec, best first: hardware, low latency, then the largest size range. */
     @Synchronized
-    fun decoders(): Map<Int, DecoderChoice> {
-        decoderCache?.let { return it }
-        val out = HashMap<Int, DecoderChoice>()
+    fun candidates(): Map<Int, List<DecoderChoice>> {
+        candidateCache?.let { return it }
+        val out = HashMap<Int, List<DecoderChoice>>()
         val list = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
         for (codec in intArrayOf(Proto.CODEC_H264, Proto.CODEC_HEVC, Proto.CODEC_AV1)) {
             val mime = mimeOf(codec)
-            val candidates = list.filter { info -> !info.isEncoder && info.supportedTypes.any { it.equals(mime, true) } }
+            val choices = list.filter { info -> !info.isEncoder && info.supportedTypes.any { it.equals(mime, true) } }
                 .mapNotNull { info ->
                     try {
                         val caps = info.getCapabilitiesForType(mime)
@@ -66,11 +76,28 @@ object DeviceCaps {
                         null
                     }
                 }
-            candidates.maxWithOrNull(compareBy<DecoderChoice>({ it.hardware }, { it.lowLatency }, { it.maxW.toLong() * it.maxH }))
-                ?.let { out[codec] = it }
+                .sortedWith(compareByDescending<DecoderChoice> { it.hardware }
+                    .thenByDescending { it.lowLatency }
+                    .thenByDescending { it.maxW.toLong() * it.maxH })
+            if (choices.isNotEmpty()) out[codec] = choices
         }
+        candidateCache = out
+        return out
+    }
+
+    /** Best decoder per codec. */
+    @Synchronized
+    fun decoders(): Map<Int, DecoderChoice> {
+        decoderCache?.let { return it }
+        val out = candidates().mapValues { it.value.first() }
         decoderCache = out
         return out
+    }
+
+    /** Best decoder for this codec that reports support for the requested size and rate, else the default pick. */
+    fun decoderFor(codec: Int, w: Int, h: Int, fps: Int): DecoderChoice? {
+        val all = candidates()[codec] ?: return null
+        return all.firstOrNull { it.supports(w, h, fps) } ?: all.first()
     }
 
     private fun isSoftwareName(name: String) =
@@ -102,8 +129,12 @@ object DeviceCaps {
     @Suppress("DEPRECATION")
     fun realMetrics(context: Context): DisplayMetrics = DisplayMetrics().also { display(context).getRealMetrics(it) }
 
+    /** Highest refresh a panel mode can show (a capability, not necessarily the mode running now). */
     fun maxRefresh(context: Context): Float =
         display(context).supportedModes.maxOfOrNull { it.refreshRate } ?: display(context).refreshRate
+
+    /** Refresh the display is running at right now, which can be lower than [maxRefresh]. */
+    fun activeRefresh(context: Context): Float = display(context).refreshRate
 
     /** Screen size in the orientation the stream will use (current orientation for [StreamOrientation.AUTO]). */
     fun streamScreenSize(context: Context, orientation: StreamOrientation): Pair<Int, Int> {
@@ -166,7 +197,7 @@ object DeviceCaps {
     /** Refresh choices from settings that this display can show. */
     fun refreshChoices(context: Context): List<Int> {
         val max = maxRefresh(context).roundToInt()
-        return listOf(30, 60, 90, 120).filter { it <= maxOf(max, 30) }
+        return listOf(30, 60, 90, 120, 144).filter { it <= maxOf(max, 30) }
     }
 
     fun configRequest(context: Context, settings: Settings): ConfigReq {
@@ -174,15 +205,23 @@ object DeviceCaps {
         val (sw, sh) = streamScreenSize(context, settings.orientation)
         var w = (sw * settings.scale).roundToInt() and 1.inv()
         var h = (sh * settings.scale).roundToInt() and 1.inv()
-        val dec = decoders()[codec]
-        if (dec != null) {
-            var guard = 0
-            while (!dec.supports(w, h) && guard++ < 20) {
-                w = (w * 0.9f).roundToInt() and 1.inv()
-                h = (h * 0.9f).roundToInt() and 1.inv()
-            }
+        var hz = settings.refreshHz.coerceAtMost(maxOf(maxRefresh(context).roundToInt(), 30))
+        // Judge size/rate with the decoder that would actually start, not the default-ranked one.
+        var dec = decoderFor(codec, w, h, hz)
+        var guard = 0
+        while (dec?.supports(w, h) == false && guard++ < 20) {
+            w = (w * 0.9f).roundToInt() and 1.inv()
+            h = (h * 0.9f).roundToInt() and 1.inv()
+            dec = decoderFor(codec, w, h, hz)
         }
-        val hz = settings.refreshHz.coerceAtMost(maxOf(maxRefresh(context).roundToInt(), 30))
+        val chosen = dec
+        if (chosen != null && hz > 0 && !chosen.supports(w, h, hz)) {
+            val supported = RATES.filter { it <= hz }
+                .firstOrNull { r -> decoderFor(codec, w, h, r)?.supports(w, h, r) == true }
+            Elog.i("decoder ${chosen.name} does not report ${w}x${h}@${hz} Hz; requesting ${supported ?: hz} Hz")
+            if (supported != null) hz = supported
+        }
+        Elog.i("stream ${w}x${h}@${hz} Hz (panel active ${activeRefresh(context)} Hz, max ${maxRefresh(context)} Hz)")
         var flags = 0
         if (settings.hidpi) flags = flags or Proto.FLAG_HIDPI
         if (settings.audio) flags = flags or Proto.FLAG_AUDIO
@@ -191,6 +230,7 @@ object DeviceCaps {
         return ConfigReq(w, h, hz, codec, settings.bitrateKbps, settings.quality, flags)
     }
 
+    private val RATES = listOf(144, 120, 90, 60, 30)
     private val CELLULAR = listOf("rmnet", "ccmni", "dummy", "p2p")
 
     /** IPv4 addresses a host on the LAN can reach, Wi-Fi first. */
