@@ -42,10 +42,14 @@ public final class VideoEncoder {
         self.onDrop = onDrop
 
         let codecType = codec == .hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264
+        // Hardware without VideoToolbox's low-latency rate control first. Measured on this Mac at
+        // 2944x1840 90fps: low-latency rate control dropped ~9.5% of frames in a standalone test and
+        // collapsed to ~20fps in the app once content hit the bitrate target, while the same session
+        // without it produced every frame. It is only a fallback when plain hardware is unavailable.
         let attempts: [[CFString: Any]] = [
+            [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true],
             [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true,
              kVTVideoEncoderSpecification_EnableLowLatencyRateControl: true],
-            [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true],
             [:],
         ]
         var status: OSStatus = -1
@@ -78,8 +82,11 @@ public final class VideoEncoder {
         // Keyframes come on demand (new stream, KEYFRAME_REQ); a periodic one bounds recovery time.
         set(kVTCompressionPropertyKey_MaxKeyFrameInterval, fps * 30)
         set(kVTCompressionPropertyKey_AverageBitRate, bitrateKbps * 1000)
+        // The measured complex-content stream sat exactly on AverageBitRate and VideoToolbox dropped
+        // frames during bursts. Allow a 2x one-second burst so transient complexity is not clipped,
+        // while the average target (and therefore steady-state bandwidth) stays unchanged.
         let bytesPerSecond = bitrateKbps * 1000 / 8
-        set(kVTCompressionPropertyKey_DataRateLimits, [bytesPerSecond * 3 / 2, 1] as CFArray)
+        set(kVTCompressionPropertyKey_DataRateLimits, [bytesPerSecond * 2, 1] as CFArray)
         set(kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanTrue!)
         set(kVTCompressionPropertyKey_MaximizePowerEfficiency, kCFBooleanFalse!)
 
@@ -152,10 +159,13 @@ public final class VideoEncoder {
             keyframe = !notSync
         }
 
-        var out = Data()
         var nalLengthSize: Int32 = 4
         var count = 0
         guard parameterSet(format, codec, 0, nil, nil, &count, &nalLengthSize) == noErr else { return nil }
+
+        let total = CMBlockBufferGetDataLength(block)
+        var out = Data()
+        out.reserveCapacity(total + 64)
         if keyframe {
             for i in 0..<count {
                 var ptr: UnsafePointer<UInt8>?
@@ -166,22 +176,38 @@ public final class VideoEncoder {
             }
         }
 
-        let total = CMBlockBufferGetDataLength(block)
-        var avcc = Data(count: total)
-        let copied = avcc.withUnsafeMutableBytes { CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: total, destination: $0.baseAddress!) }
-        guard copied == noErr else { return nil }
         let lenSize = Int(nalLengthSize)
+        // A contiguous block buffer is parsed in place; a non-contiguous one uses a bounded copy.
+        if CMBlockBufferIsRangeContiguous(block, atOffset: 0, length: total) {
+            var ptr: UnsafeMutablePointer<Int8>?
+            var available = 0
+            let status = CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil,
+                                                    totalLengthOut: &available, dataPointerOut: &ptr)
+            if status == noErr, let ptr, available >= total {
+                appendNals(&out, UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt8.self), total, lenSize)
+                return (out, keyframe)
+            }
+        }
+        var avcc = [UInt8](repeating: 0, count: total)
+        let copied = avcc.withUnsafeMutableBytes {
+            CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: total, destination: $0.baseAddress!)
+        }
+        guard copied == noErr else { return nil }
+        avcc.withUnsafeBufferPointer { appendNals(&out, $0.baseAddress!, total, lenSize) }
+        return (out, keyframe)
+    }
+
+    /// Converts the format's length-prefixed NAL units to Annex-B start codes without intermediate slices.
+    private static func appendNals(_ out: inout Data, _ base: UnsafePointer<UInt8>, _ total: Int, _ lenSize: Int) {
         var offset = 0
-        out.reserveCapacity(out.count + total + 16)
         while offset + lenSize <= total {
             var nalLength = 0
-            for i in 0..<lenSize { nalLength = nalLength << 8 | Int(avcc[offset + i]) }
+            for i in 0..<lenSize { nalLength = nalLength << 8 | Int(base[offset + i]) }
             offset += lenSize
             guard nalLength > 0, offset + nalLength <= total else { break }
             out.append(startCode)
-            out.append(avcc.subdata(in: offset..<offset + nalLength))
+            out.append(base + offset, count: nalLength)
             offset += nalLength
         }
-        return (out, keyframe)
     }
 }
