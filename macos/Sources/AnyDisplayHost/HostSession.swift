@@ -111,6 +111,13 @@ public final class HostSession {
     private var diagSent: UInt64 = 0
     private var diagBytes: UInt64 = 0
 
+    // Idle repeats (PROTOCOL.md 5.2): some decoders hold frames until more input arrives, so once the
+    // screen stops changing the last capture is encoded a few more times to push it through.
+    private static let idleDelay = 0.1
+    private static let idleRepeats = 8
+    private var lastCaptureTime = 0.0
+    private var idleRepeatsLeft = 0
+
     public init(endpoint: NWEndpoint, store: PairingStore, options: SessionOptions = SessionOptions()) {
         self.endpoint = endpoint
         self.store = store
@@ -380,9 +387,6 @@ public final class HostSession {
         var codec: Codec = req.codec == Codec.hevc.rawValue ? .hevc : .h264
         if !canDecode(codec) { codec = canDecode(.h264) ? .h264 : .hevc }
 
-        var kbps = Int(req.bitrateKbps)
-        if kbps == 0 { kbps = Self.autoBitrate(width: w, height: h, fps: fps, quality: Int(req.quality), codec: codec) }
-
         // Display: a virtual display unless mirroring was asked for or is the only option.
         var mirror = requested.contains(.mirror)
         var displayID = CGMainDisplayID()
@@ -426,18 +430,23 @@ public final class HostSession {
         latestPending = false
 
         let sid = streamID
+        let bitrateFor = { (c: Codec) in
+            req.bitrateKbps == 0
+                ? Self.autoBitrate(width: w, height: h, fps: fps, quality: Int(req.quality), codec: c)
+                : Int(req.bitrateKbps)
+        }
         let enc: VideoEncoder
+        let kbps: Int
         do {
-            enc = try makeEncoder(codec: codec, width: w, height: h, fps: fps, kbps: kbps, streamID: sid)
-        } catch {
-            if codec == .hevc, canDecode(.h264),
-               let fallback = try? makeEncoder(codec: .h264, width: w, height: h, fps: fps, kbps: kbps, streamID: sid) {
-                codec = .h264
-                enc = fallback
-            } else {
-                close(error: "\(error)", bye: .error)
-                return
+            let selected = try Self.selectEncoder(preferred: codec, supportsH264: canDecode(.h264), bitrateFor: bitrateFor) { c, rate in
+                try self.makeEncoder(codec: c, width: w, height: h, fps: fps, kbps: rate, streamID: sid)
             }
+            enc = selected.encoder
+            codec = selected.codec
+            kbps = selected.bitrateKbps
+        } catch {
+            close(error: "\(error)", bye: .error)
+            return
         }
         encoder = enc
         if !enc.isHardware { notice(.softwareEncoder, "Hardware \(codec == .hevc ? "HEVC" : "H.264") encoder unavailable; using software") }
@@ -580,6 +589,18 @@ public final class HostSession {
         return Int(min(max(kbps, 2000), 60000))
     }
 
+    static func selectEncoder<Encoder>(preferred: Codec, supportsH264: Bool, bitrateFor: (Codec) -> Int,
+                                       create: (Codec, Int) throws -> Encoder) throws -> (encoder: Encoder, codec: Codec, bitrateKbps: Int) {
+        let kbps = bitrateFor(preferred)
+        do {
+            return (try create(preferred, kbps), preferred, kbps)
+        } catch {
+            guard preferred == .hevc && supportsH264 else { throw error }
+            let fallbackKbps = bitrateFor(.h264)
+            return (try create(.h264, fallbackKbps), .h264, fallbackKbps)
+        }
+    }
+
     private func makeEncoder(codec: Codec, width: Int, height: Int, fps: Int, kbps: Int, streamID sid: UInt32) throws -> VideoEncoder {
         try VideoEncoder(codec: codec, width: width, height: height, fps: fps, bitrateKbps: kbps,
                          onOutput: { [weak self] out in self?.queue.async { self?.onEncoded(out, streamID: sid) } },
@@ -628,7 +649,27 @@ public final class HostSession {
         if latestPending { skippedCaptures &+= 1 }
         latest = pb
         latestPending = true
+        lastCaptureTime = CACurrentMediaTime()
+        idleRepeatsLeft = Self.idleRepeats
+        scheduleIdleRepeat(after: Self.idleDelay, streamID: sid)
         submitIfPossible()
+    }
+
+    private func scheduleIdleRepeat(after delay: Double, streamID sid: UInt32) {
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.idleRepeat(streamID: sid) }
+    }
+
+    /// Re-encodes the last capture while the screen is idle. Captures schedule one of these each; only the one
+    /// after the newest capture finds the screen idle, so a single chain of repeats runs at the stream's frame rate.
+    private func idleRepeat(streamID sid: UInt32) {
+        guard sid == streamID, phase == .streaming, latest != nil, idleRepeatsLeft > 0,
+              CACurrentMediaTime() - lastCaptureTime >= Self.idleDelay else { return }
+        idleRepeatsLeft -= 1
+        latestPending = true
+        submitIfPossible()
+        if idleRepeatsLeft > 0 {
+            scheduleIdleRepeat(after: 1 / Double(max(streamInfo?.refreshHz ?? 60, 1)), streamID: sid)
+        }
     }
 
     /// Encodes the newest captured frame unless 3 frames are unacknowledged; skipped captures are
